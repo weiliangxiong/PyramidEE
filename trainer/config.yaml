@@ -1,0 +1,27 @@
+save_dir: "/root/autodl-tmp/model_0723/data5/0714_6"
+checkpoints_dir: "/root/autodl-tmp/checkpoints_0723/checkpoints_data5/0714_6"
+data_cache_dir: "/root/autodl-tmp/data5/compact_cache2"            #"/data/weilx/data_cache"
+#data_cache_dir: "/root/aliyun_root_download/compact_cache/compact_cache/" 
+model_class_path: "model.Base"  # model_minimind_base_data4 #model_minimind_0312_data4_same   #model_minimind_0312_2_data5  model_minimind_0312_2_2048  model_minimind_0428_3  model_minimind_base_data5
+mlp_config_path: "mlp_config.mlp_cos"  
+batch_size: 2
+accumulation_steps: 96
+max_seq_len: 1024
+log_interval: 960  #640  #960  #320
+save_interval:  242880 #242880  # 242880  # 806400000 #40320       # 4e4
+hidden_size: 1024
+num_hidden_layers: 16
+data_path: '/root/dataset/data5.jsonl' 
+from_weight: 'none' # none #pretrain
+from_resume: 0
+load_model_step: 300
+hash_code: "3f1e51ef3c4a"    # "8e14a477a0c4"   3f1e51ef3c4a
+length_buckets:
+  - [0, 150]
+  - [150, 300]
+  - [300, 500]
+  - [500, 750]
+  - [750, 990]
+  - [990, 1024]
+
+
