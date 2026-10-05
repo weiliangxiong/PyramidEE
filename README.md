@@ -47,7 +47,7 @@ To start pre\-training:
 
 ```Plain Text
 cd trainer
-python pre_train5.py
+torchrun --nproc_per_node=8 train_pretrain5.py
 ```
 
 
@@ -78,18 +78,6 @@ Different instantiations of PyramidEE can be specified via the `mlp_config_path`
 Available MLP options include `mlp_pow`, `mlp_cos`, `mlp_linear`.
 
 
-### Training Log Example
-The training process prints logs to stdout, containing main loss, auxiliary early‑exit loss, learning rate and timing information:
-
-<img src="log.png" alt="Training Log Example" width="720"/>
-
-**Field explanation**:
-- `loss`: Combined training loss
-- `logits_loss`: Main language modeling loss from final output layer
-- `aux_loss`: Aggregated auxiliary loss from PyramidEE early‑exit branches. `aux_loss: 0.0000` means early‑exit branches are not activated.
-- `lr`: Current learning rate
-- `epoch_time`: Estimated total epoch time
-- `Validation Loss`: Loss computed on validation split
 
 ## Acknowledgements
 This work is built upon the **MiniMind** project. We thank the authors for their open‑source contributions.
