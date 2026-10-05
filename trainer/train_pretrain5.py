@@ -34,7 +34,7 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu", help="训练设备")
     parser.add_argument("--dtype", type=str, default="bfloat16", help="混合精度类型")
     #float32  bfloat16
-    parser.add_argument("--num_workers", type=int, default=0, help="数据加载线程数")
+    parser.add_argument("--num_workers", type=int, default=4, help="数据加载线程数")
     parser.add_argument("--accumulation_steps", type=int, default=32, help="梯度累积步数")
     parser.add_argument("--grad_clip", type=float, default=1.0, help="梯度裁剪阈值")
     parser.add_argument("--log_interval", type=int, default=320, help="日志打印间隔")
@@ -193,8 +193,19 @@ if __name__ == "__main__":
         model = torch.compile(model)
         Logger('torch.compile enabled')
 
-
-
+    # if dist.is_initialized():
+    #     model = DistributedDataParallel(
+    #         model, 
+    #         device_ids=[local_rank],
+    #         find_unused_parameters=True  # ← 加上这个
+    #     )
+    # model = torch.nn.parallel.DistributedDataParallel(
+    #     model,
+    #     device_ids=[local_rank],
+    #     output_device=local_rank,
+    #     static_graph=False,
+    #     find_unused_parameters=True  # ← 必须加
+    # )
     
         # 使用紧凑缓存
     print("构建数据集...")
@@ -232,8 +243,8 @@ if __name__ == "__main__":
 
             # 随机分割为训练集和验证集（例如 9:1 比例）
     #val_size = int(0.1 * len(full_train_ds))  # 验证集大小为总数据的10%
-    val_size=500
-    train_size = len(full_train_ds) - val_size
+    # val_size=500
+    # train_size = len(full_train_ds) - val_size
     base_seed = 1337
     #torch.manual_seed(base_seed)
     #torch.cuda.manual_seed(base_seed)
@@ -248,9 +259,26 @@ if __name__ == "__main__":
     # )
 
 
-    # 生成固定的验证集索引，这里取前 val_size 个样本
+    # # 生成固定的验证集索引，这里取前 val_size 个样本
+    # val_indices = list(range(val_size))
+    # train_indices = list(range(val_size, len(full_train_ds)))
+
+
+    max_len = len(full_train_ds)
+    if hasattr(full_train_ds, 'seq_lens'):
+        max_len = min(max_len, len(full_train_ds.seq_lens))
+    elif hasattr(full_train_ds, 'dataset') and hasattr(full_train_ds.dataset, 'seq_lens'):
+        max_len = min(max_len, len(full_train_ds.dataset.seq_lens))
+    
+    # 验证集大小，确保不超过 max_len
+    val_size = 500
+    if val_size >= max_len:
+        val_size = int(max_len * 0.1)  # 如果数据集太小，按比例分
+    
+    # 生成不越界的索引
     val_indices = list(range(val_size))
-    train_indices = list(range(val_size, len(full_train_ds)))
+    train_indices = list(range(val_size, max_len))  # 最大到 max_len-1，不会越界
+
 
     train_ds = torch.utils.data.Subset(full_train_ds, train_indices)
     val_ds = torch.utils.data.Subset(full_train_ds, val_indices)
@@ -310,7 +338,8 @@ if __name__ == "__main__":
     if dist.is_initialized():
         model._ddp_params_and_buffers_to_ignore = {"freqs_cos", "freqs_sin"}
         model = DistributedDataParallel(model, device_ids=[local_rank])
-    
+    world_size = dist.get_world_size() if dist.is_initialized() else 1
+    rank = dist.get_rank() if dist.is_initialized() else 0
     # ========== 8. 开始训练 ==========
     for epoch in range(start_epoch, args.epochs):
         #train_sampler and train_sampler.set_epoch(epoch)
@@ -330,8 +359,25 @@ if __name__ == "__main__":
            
         # )
 
-        val_sampler = DebugRoundRobinSampler(val_ds, config["batch_size"], BUCKETS)
-        train_sampler = DebugRoundRobinSampler(train_ds, config["batch_size"], BUCKETS)
+        # val_sampler = DebugRoundRobinSampler(val_ds, config["batch_size"], BUCKETS)
+        # train_sampler = DebugRoundRobinSampler(train_ds, config["batch_size"], BUCKETS)
+
+        train_sampler = DistributedDebugRoundRobinSampler(
+            dataset=train_ds,
+            batch_size=config["batch_size"],
+            buckets=BUCKETS,
+            num_replicas=world_size,
+            rank=rank
+        )
+        
+        val_sampler = DistributedDebugRoundRobinSampler(
+            dataset=val_ds,
+            batch_size=config["batch_size"],
+            buckets=BUCKETS,
+            num_replicas=world_size,
+            rank=rank
+        )
+        
 
         #dataloader = DataLoader(dataset, batch_sampler=sampler, collate_fn=dataset.collate_fn, num_workers=0)
     
@@ -347,3 +393,4 @@ if __name__ == "__main__":
     
     # ========== 9. 清理分布进程 ==========
     if dist.is_initialized(): dist.destroy_process_group()
+

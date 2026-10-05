@@ -52,6 +52,8 @@ def my_mkdir(folder_name):
         print(f"文件夹 '{folder_name}' 已存在。")
 
 def val_epoch(val_loader, model,autocast_ctx,args,wandb=None):
+    #t1=time.time()
+
     model.eval()
     total_loss = 0.0
     max_val_steps=60
@@ -65,7 +67,8 @@ def val_epoch(val_loader, model,autocast_ctx,args,wandb=None):
             seq_lengths = seq_lengths.to(args.device)
             with autocast_ctx:
                 res = model(input_ids, labels=labels,seq_lengths=seq_lengths)
-                loss = res.loss + res.aux_loss
+                loss = res.loss
+                #loss = res.loss + res.aux_loss
                 loss = loss / args.accumulation_steps
                 current_loss = loss.item() * args.accumulation_steps
             total_loss+=current_loss
@@ -75,12 +78,16 @@ def val_epoch(val_loader, model,autocast_ctx,args,wandb=None):
     
     #avg_loss = total_loss / len(val_loader)
     avg_loss = total_loss / max_val_steps
-    Logger(f'Validation Loss: {avg_loss:.6f}')
+    
     #print('--------------')
     #print(f'Validation Loss: {avg_loss:.6f}')
-    if wandb:
-        wandb.log({"val_loss": avg_loss})
+    # if wandb:
+    #     wandb.log({"val_loss": avg_loss})
     model.train()  # 回到训练模式
+    #t2=time.time()
+    #val_time=t2-t1
+    #Logger(f'Validation Loss: {avg_loss:.6f}, Val Time: {val_time:.1f}')
+    
     return avg_loss
 
 
@@ -116,17 +123,40 @@ def train_epoch(optimizer,scaler,lm_config,model,autocast_ctx,epoch, loader, ite
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
 
-        with autocast_ctx:
+            # ✅ 判断是否是累积的最后一步
+        is_accumulation_last_step = (step + 1) % args.accumulation_steps == 0
+        
+        # ✅ 如果不是最后一步，禁用梯度同步
+        # if not is_accumulation_last_step and dist.is_initialized():
+        #     sync_ctx = model.no_sync()
+        # else:
+        #     sync_ctx = nullcontext()
+
+        sync_ctx = model.no_sync()
+        
+        with sync_ctx:
+            #with autocast_ctx:
             res = model(input_ids, labels=labels,seq_lengths=seq_lengths)
-            loss = res.loss + res.aux_loss
+            #loss = res.loss + res.aux_loss
+            loss = res.loss
             #loss = res.loss
             loss = loss / args.accumulation_steps
-
-        scaler.scale(loss).backward()
+    
+            scaler.scale(loss).backward()
 
         if (step + 1) % args.accumulation_steps == 0:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+
+
+            for param in model.parameters():
+                if param.grad is not None:
+                    torch.distributed.all_reduce(
+                        param.grad, 
+                        op=torch.distributed.ReduceOp.SUM
+                    )
+                    param.grad /= torch.distributed.get_world_size()
+                
 
             scaler.step(optimizer)
             scaler.update()
@@ -139,17 +169,21 @@ def train_epoch(optimizer,scaler,lm_config,model,autocast_ctx,epoch, loader, ite
             start_time2=time.time()
             
             current_loss = loss.item() * args.accumulation_steps
-            current_aux_loss = res.aux_loss.item() if res.aux_loss is not None else 0.0
-            current_logits_loss = current_loss - current_aux_loss
+            #current_aux_loss = res.aux_loss.item() if res.aux_loss is not None else 0.0
+            #current_logits_loss = current_loss - current_aux_loss
+            current_logits_loss = current_loss 
             current_lr = optimizer.param_groups[-1]['lr']
             eta_min = spend_time / (step + 1) * iters // 60 - spend_time // 60
-            Logger(f'Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), loss: {current_loss:.4f}, logits_loss: {current_logits_loss:.4f}, aux_loss: {current_aux_loss:.4f}, lr: {current_lr:.8f}, epoch_time: {eta_min:.1f}min')
-            Logger(f'train_time:{train_time}')
-            if wandb: wandb.log({"loss": current_loss, "logits_loss": current_logits_loss, "aux_loss": current_aux_loss, "learning_rate": current_lr, "epoch_time": eta_min})
+            
+            #Logger(f'train_time:{train_time}')
+            #if wandb: wandb.log({"loss": current_loss, "logits_loss": current_logits_loss, "learning_rate": current_lr, "epoch_time": eta_min})
             t1=time.time()
-            val_epoch(val_loader, model,autocast_ctx,args,wandb)
+            val_loss=val_epoch(val_loader, model,autocast_ctx,args,wandb)
             t2=time.time()
-            Logger(f'val_time:{t2-t1}')
+            val_time=t2-t1
+            Logger(f'Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), train_loss: {current_loss:.4f}, lr: {current_lr:.8f}, val_loss:{val_loss:.4f}, train_time: {train_time:.2f} Sec, val_time:{val_time:.2f} Sec')
+            
+            #Logger(f'val_time:{t2-t1}')
 
         if (step % args.save_interval == 0 or step == iters - 1) and is_main_process():
             model.eval()

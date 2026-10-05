@@ -66,20 +66,67 @@ class BucketCachedDataset(Dataset):
         f.seek(self.offsets[idx])
         raw_bytes = f.read(self.tokens_lens[idx])
         # 直接bytes → tensor，绕过numpy
-        input_ids = torch.frombuffer(raw_bytes, dtype=torch.int16).to(torch.int32).clone()
+        input_ids = torch.frombuffer(raw_bytes, dtype=torch.uint16).to(torch.int32).clone()
+        #print(input_ids)
+        # from transformers import AutoTokenizer
+        # tok = AutoTokenizer.from_pretrained(
+        #         "/root/autodl-tmp/chatglm3_token",
+        #         trust_remote_code=True,          # ChatGLM3 必须
+        #         local_files_only=True,           # 纯离线，不连 HF
+        #     )
+            
+        # # input_ids 可以是 list / numpy / torch 一维
+        # text = tok.decode(input_ids, skip_special_tokens=True)
+        # print(text)
+        
         return {"input_ids": input_ids, "seq_len": int(self.seq_lens[idx])}
 
+    # def collate_fn(self, batch):
+    #     seq_lens = [x["seq_len"] for x in batch]
+    #     max_len = max(seq_lens)
+    #     #if max_len>1024:
+    #     #    max_len=1024
+
+        
+        
+    #     bs = len(batch)
+    #     input_ids = torch.full((bs, max_len), self.pad_token_id, dtype=torch.long)
+    #     labels = torch.full((bs, max_len), -100, dtype=torch.long)
+    #     for i, x in enumerate(batch):
+    #         #print(x["input_ids"].min())
+    #         #print(x["input_ids"].max())
+    #         sl = x["seq_len"]
+    #         input_ids[i, :sl] = x["input_ids"][:sl]
+    #         labels[i, :sl] = x["input_ids"][:sl]
+    #     # print(input_ids)
+    #     # print(input_ids.min())
+    #     # print(input_ids.max())
+    #     # print(self.pad_token_id)
+    #     return input_ids, labels, torch.tensor(seq_lens)
     def collate_fn(self, batch):
         seq_lens = [x["seq_len"] for x in batch]
         max_len = max(seq_lens)
+        
+        # 限制最大长度为 1024
+        MAX_LEN = 1024
+        max_len = min(max_len, MAX_LEN)
+        
         bs = len(batch)
         input_ids = torch.full((bs, max_len), self.pad_token_id, dtype=torch.long)
         labels = torch.full((bs, max_len), -100, dtype=torch.long)
+        
         for i, x in enumerate(batch):
             sl = x["seq_len"]
-            input_ids[i, :sl] = x["input_ids"][:sl]
-            labels[i, :sl] = x["input_ids"][:sl]
-        return input_ids, labels, torch.tensor(seq_lens)
+            # 实际拷贝的长度：取 seq_len 和 max_len 的较小值
+            effective_len = min(sl, max_len)
+            
+            input_ids[i, :effective_len] = x["input_ids"][:effective_len]
+            labels[i, :effective_len] = x["input_ids"][:effective_len]
+        
+        # seq_lens 也要反映截断后的真实长度
+        truncated_seq_lens = [min(sl, max_len) for sl in seq_lens]
+        
+        return input_ids, labels, torch.tensor(truncated_seq_lens)
 
 # ====================== 4. 最终版：桶样本数为batch_size整数倍 ======================
 class DebugRoundRobinSampler(Sampler):
@@ -164,6 +211,41 @@ class DebugRoundRobinSampler(Sampler):
                 current_batch = batch_list[self.counter[bucket_id] % len(batch_list)]
                 self.counter[bucket_id] += 1
                 yield current_batch
+
+# 在你的代码里添加这个类，或者修改原有的 DebugRoundRobinSampler
+class DistributedDebugRoundRobinSampler:
+    def __init__(self, dataset, batch_size, buckets, num_replicas=None, rank=None, **kwargs):
+        # 只保存参数，不在这里生成任何列表
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.buckets = buckets
+        self.kwargs = kwargs
+        
+        if num_replicas is None:
+            num_replicas = dist.get_world_size() if dist.is_initialized() else 1
+        if rank is None:
+            rank = dist.get_rank() if dist.is_initialized() else 0
+        self.num_replicas = num_replicas
+        self.rank = rank
+        
+        # 初始化 base_sampler（它内部可能做了分桶统计，这是轻量的）
+        self.base_sampler = DebugRoundRobinSampler(dataset, batch_size, buckets, **kwargs)
+    
+    def __iter__(self):
+        # ✅ 关键：直接迭代 base_sampler，不调用 list()
+        # 用 enumerate 获取全局 batch 序号，只 yield 属于当前 rank 的 batch
+        for global_batch_idx, batch_indices in enumerate(self.base_sampler):
+            if global_batch_idx % self.num_replicas == self.rank:
+                yield batch_indices
+    
+    def __len__(self):
+        # 估算当前 rank 的 batch 数量（向上取整）
+        # 如果 base_sampler 有 __len__，可以用它来算
+        if hasattr(self.base_sampler, '__len__'):
+            total_batches = len(self.base_sampler)
+            return (total_batches + self.num_replicas - 1 - self.rank) // self.num_replicas
+        return 0
+        
 
 # ====================== 5. 测试代码 ======================
 if __name__ == "__main__":
