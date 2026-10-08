@@ -3,6 +3,11 @@
 ## 1\. Introduction
 
 PyramidEE is an early\-exit\-aware Transformer architecture designed to accelerate both training and inference of large language models and improve model performance\. It introduces pyramid\-structured early\-exit branches and optional skip\-layer mechanisms to reduce computational cost while maintaining competitive model performance\.
+The pre‑trained model weights are available for download via the link below:
+
+Link: [https://pan.baidu.com/s/1PjOPLGfXxliNA83zX25quQ?pwd=c3rv](https://pan.baidu.com/s/1PjOPLGfXxliNA83zX25quQ?pwd=c3rv)
+Extraction code: c3rv
+
 
 ## 2\. Environment Setup
 
